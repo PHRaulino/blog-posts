@@ -1,0 +1,116 @@
+---
+   author: 'PH Raulino'
+   date: '2023-07-27'
+   title: 'Comparação de métodos de consulta em banco de dados: análise de desempenho utilizando SQLAlchemy'
+   description: 'O post discute um estudo comparando quatro métodos de consulta em banco de dados usando SQLAlchemy. O melhor desempenho é alcançado com o terceiro método, que executa SQL bruto e converte os resultados em um dicionário.'
+---
+
+## Objetivo
+
+O estudo buscou avaliar diferentes métodos de consulta em um banco de dados para encontrar todas as listas que não possuem tarefas. Para isso, foram criadas três tabelas e inseridos aleatoriamente 1000 Listas, 1 Tipo Tarefa e 1000 Tarefas nas listas.
+
+Em seguida, foram testados quatro diferentes métodos de consulta, utilizando a biblioteca timeit para medir o tempo de execução de cada um deles.
+
+## Primeiro Método
+
+O primeiro método de consulta utilizado no estudo consistiu em pegar todas as tarefas com o uso da sessão do banco de dados e, em seguida, filtrar o resultado utilizando um loop for e um if para trazer apenas as listas que não possuem tarefas.
+
+Ao medir o tempo de execução do método utilizando a biblioteca timeit, os resultados obtidos foram:
+
+- 80.31528 segundos em 10.000 execuções
+- 8.45821 segundos em 1.000 execuções
+- 1.13667 segundos em 100 execuções
+
+Esses resultados mostram que, apesar do método ser funcional, ele é bastante ineficiente para grandes quantidades de dados, já que o tempo de execução é muito elevado.
+
+```python
+		model = table.get_model("Table")
+
+    lists = db.query(model).all()
+
+    [
+        list_model
+        for list_model in lists
+        if len(list(list_model.lists_tasks_types)) == 0
+    ]
+```
+
+## Segundo Método
+
+O segundo método de consulta utilizado no estudo consistiu em fazer uma subquery e utilizá-la como filtro para a query principal utilizando o ORM sqlalchemy.
+
+Os resultados obtidos com este método foram significativamente melhores do que os resultados do primeiro método, que utilizava um for loop para filtrar as listas sem tarefas. A seguir estão os tempos de execução em segundos para este método:
+
+- 39.21246 segundos em 10.000 execuções
+- 3.86407 segundos em 1.000 execuções
+- 0.40279 segundos em 100 execuções
+
+Os resultados mostram que este método é mais eficiente do que o primeiro, uma vez que utiliza subquery para fazer uma pré-seleção das listas que não possuem tarefas, reduzindo o volume de dados a serem processados na query principal.
+
+```python
+model = table.get_model("Table")
+
+    subquery = (
+        db.query(model.id_list)
+        .join(ListTaskTypeModel)
+        .join(TaskModel)
+        .group_by(model.id_list)
+        .having(func.count(TaskModel.id_task) > 0)
+        .subquery()
+    )
+
+    # Selecionar as listas que não estão na subconsulta
+    lists_without_tasks = (
+        db.query(model)
+        .outerjoin(ListTaskTypeModel)
+        .outerjoin(TaskModel)
+        .filter(model.id_list.notin_(subquery))
+        .all()
+    )
+```
+
+## Terceiro Método
+
+O terceiro método utilizado no estudo consistiu em utilizar uma consulta SQL bruta, executada diretamente na base de dados, e transformar o resultado em um dicionário.
+
+Os resultados deste método foram melhores do que os resultados do segundo método, que utilizava o ORM sqlalchemy com subquery. A seguir estão os tempos de execução em segundos para este método:
+
+- 5.95166 segundos em 10.000 execuções
+- 0.59906 segundos em 1.000 execuções
+- 0.06127 segundos em 100 execuções
+
+Os resultados indicam que este método é ainda mais eficiente do que o segundo método, uma vez que utiliza uma consulta SQL bruta, que geralmente é mais rápida do que o ORM, e depois transforma o resultado em um dicionário, que é uma estrutura de dados mais leve do que os objetos ORM.
+
+```python
+result = db.execute(query).cursor
+    col_names = [desc[0] for desc in result.description]
+    return cursor_to_dict(col_names, result)
+```
+
+## Quarto Método
+
+O quarto método utilizado no estudo consistiu em criar um cursor com a engine do banco de dados diretamente na classe DBManager, que cria sessões, e executar uma consulta SQL bruta utilizando este cursor. Em seguida, o resultado foi transformado em um dicionário.
+
+Os resultados deste método foram um pouco piores do que os resultados do terceiro método, que utilizava uma consulta SQL bruta com o método execute do ORM sqlalchemy. A seguir estão os tempos de execução em segundos para este método:
+
+- 7.13930 segundos em 10.000 execuções
+- 0.71640 segundos em 1.000 execuções
+- 0.07325 segundos em 100 execuções
+
+Os resultados indicam que este método é um pouco menos eficiente do que o terceiro método, provavelmente devido ao fato de que ele cria um cursor com a engine do banco de dados em vez de usar a função execute do ORM sqlalchemy. No entanto, os tempos de execução ainda são bastante bons em comparação com o primeiro e o segundo método.
+
+```python
+with database.engine.connect() as db:
+        result = db.execute(query).cursor
+        col_names = [desc[0] for desc in result.description]
+        resultado = cursor_to_dict(col_names, result)
+    return resultado
+```
+
+## Conclusão
+
+O método 3 é o mais rápido porque ele faz uma consulta direta ao banco de dados usando o método `execute` do SQLAlchemy. Ao fazer isso, ele evita a sobrecarga de uso do ORM e da criação de objetos desnecessários em memória, que podem consumir recursos e tornar a consulta mais lenta.
+
+Além disso, o método 3 retorna um cursor, que é uma estrutura de baixo nível para acessar os resultados da consulta, e converte esses resultados em um dicionário. Isso permite que a consulta seja executada de forma mais eficiente e que os resultados sejam manipulados de forma mais flexível.
+
+Ao evitar o uso do ORM, o método 3 também permite que as consultas sejam mais otimizadas e que o desempenho do banco de dados seja maximizado, especialmente em consultas mais complexas ou com grandes volumes de dados. Por essas razões, o método 3 pode ser a melhor escolha para consultas que precisam de alta eficiência e desempenho.

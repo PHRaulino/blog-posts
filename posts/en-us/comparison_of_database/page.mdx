@@ -1,0 +1,116 @@
+---
+   author: 'PH Raulino'
+   date: '2023-07-27'
+   title: 'Comparison of Database Query Methods: Performance Analysis using SQLAlchemy'
+   description: 'The post discusses a study comparing four database query methods using SQLAlchemy. The best performance is achieved with the third method, which executes raw SQL and converts results into a dictionary.'
+---
+
+## Objective
+
+The study aimed to evaluate different methods of querying a database to find all lists without tasks. For this purpose, three tables were created, and 1000 Lists, 1 Task Type, and 1000 Tasks were randomly inserted into the lists.
+
+Next, four different query methods were tested, using the timeit library to measure the execution time of each of them.
+
+## First Method
+
+The first query method used in the study involved fetching all tasks using the database session and then filtering the result using a for loop and an if statement to retrieve only the lists without tasks.
+
+When measuring the execution time of this method using the timeit library, the following results were obtained:
+
+- 80.31528 seconds in 10,000 executions
+- 8.45821 seconds in 1,000 executions
+- 1.13667 seconds in 100 executions
+
+These results show that, although the method is functional, it is quite inefficient for large amounts of data, as the execution time is very high.
+
+```python
+model = table.get_model("Table")
+
+lists = db.query(model).all()
+
+[
+    list_model
+    for list_model in lists
+    if len(list(list_model.lists_tasks_types)) == 0
+]
+```
+
+## Second Method
+
+The second query method used in the study involved creating a subquery and using it as a filter for the main query using the SQLAlchemy ORM.
+
+The results obtained with this method were significantly better than the results of the first method, which used a for loop to filter lists without tasks. The following are the execution times in seconds for this method:
+
+- 39.21246 seconds in 10,000 executions
+- 3.86407 seconds in 1,000 executions
+- 0.40279 seconds in 100 executions
+
+The results show that this method is more efficient than the first one, as it uses a subquery to pre-select lists without tasks, reducing the volume of data to be processed in the main query.
+
+```python
+model = table.get_model("Table")
+
+subquery = (
+    db.query(model.id_list)
+    .join(ListTaskTypeModel)
+    .join(TaskModel)
+    .group_by(model.id_list)
+    .having(func.count(TaskModel.id_task) > 0)
+    .subquery()
+)
+
+# Select lists that are not in the subquery
+lists_without_tasks = (
+    db.query(model)
+    .outerjoin(ListTaskTypeModel)
+    .outerjoin(TaskModel)
+    .filter(model.id_list.notin_(subquery))
+    .all()
+)
+```
+
+## Third Method
+
+The third method used in the study involved using a raw SQL query executed directly on the database and transforming the result into a dictionary.
+
+The results of this method were better than the results of the second method, which used the SQLAlchemy ORM with a subquery. The following are the execution times in seconds for this method:
+
+- 5.95166 seconds in 10,000 executions
+- 0.59906 seconds in 1,000 executions
+- 0.06127 seconds in 100 executions
+
+The results indicate that this method is even more efficient than the second method, as it uses a raw SQL query, which is generally faster than the ORM, and then transforms the result into a dictionary, which is a lighter data structure than ORM objects.
+
+```python
+result = db.execute(query).cursor
+col_names = [desc[0] for desc in result.description]
+return cursor_to_dict(col_names, result)
+```
+
+## Fourth Method
+
+The fourth method used in the study involved creating a cursor with the database engine directly in the DBManager class, which creates sessions, and executing a raw SQL query using this cursor. Then, the result was transformed into a dictionary.
+
+The results of this method were slightly worse than the results of the third method, which used a raw SQL query with the execute method of the SQLAlchemy ORM. The following are the execution times in seconds for this method:
+
+- 7.13930 seconds in 10,000 executions
+- 0.71640 seconds in 1,000 executions
+- 0.07325 seconds in 100 executions
+
+The results indicate that this method is slightly less efficient than the third method, probably because it creates a cursor with the database engine instead of using the execute function of the SQLAlchemy ORM. However, the execution times are still quite good compared to the first and second methods.
+
+```python
+with database.engine.connect() as db:
+    result = db.execute(query).cursor
+    col_names = [desc[0] for desc in result.description]
+    resultado = cursor_to_dict(col_names, result)
+return resultado
+```
+
+## Conclusion
+
+Method 3 is the fastest because it makes a direct query to the database using the `execute` method of SQLAlchemy. By doing so, it avoids the overhead of using the ORM and creating unnecessary objects in memory, which can consume resources and slow down the query.
+
+Additionally, Method 3 returns a cursor, which is a low-level structure for accessing query results, and converts these results into a dictionary. This allows the query to be executed more efficiently, and the results to be handled more flexibly.
+
+By avoiding the use of the ORM, Method 3 also allows queries to be more optimized and maximizes the performance of the database, especially in more complex queries or with large volumes of data. For these reasons, Method 3 may be the best choice for queries that require high efficiency and performance.
