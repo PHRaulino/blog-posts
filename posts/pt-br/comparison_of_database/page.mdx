@@ -24,15 +24,15 @@ Ao medir o tempo de execução do método utilizando a biblioteca timeit, os res
 Esses resultados mostram que, apesar do método ser funcional, ele é bastante ineficiente para grandes quantidades de dados, já que o tempo de execução é muito elevado.
 
 ```python
-		model = table.get_model("Table")
+model = table.get_model("Table")
 
-    lists = db.query(model).all()
+lists = db.query(model).all()
 
-    [
-        list_model
-        for list_model in lists
-        if len(list(list_model.lists_tasks_types)) == 0
-    ]
+[
+    list_model
+    for list_model in lists
+    if len(list(list_model.lists_tasks_types)) == 0
+]
 ```
 
 ## Segundo Método
@@ -50,23 +50,23 @@ Os resultados mostram que este método é mais eficiente do que o primeiro, uma 
 ```python
 model = table.get_model("Table")
 
-    subquery = (
-        db.query(model.id_list)
-        .join(ListTaskTypeModel)
-        .join(TaskModel)
-        .group_by(model.id_list)
-        .having(func.count(TaskModel.id_task) > 0)
-        .subquery()
-    )
+subquery = (
+    db.query(model.id_list)
+    .join(ListTaskTypeModel)
+    .join(TaskModel)
+    .group_by(model.id_list)
+    .having(func.count(TaskModel.id_task) > 0)
+    .subquery()
+)
 
-    # Selecionar as listas que não estão na subconsulta
-    lists_without_tasks = (
-        db.query(model)
-        .outerjoin(ListTaskTypeModel)
-        .outerjoin(TaskModel)
-        .filter(model.id_list.notin_(subquery))
-        .all()
-    )
+# Selecionar as listas que não estão na subconsulta
+lists_without_tasks = (
+    db.query(model)
+    .outerjoin(ListTaskTypeModel)
+    .outerjoin(TaskModel)
+    .filter(model.id_list.notin_(subquery))
+    .all()
+)
 ```
 
 ## Terceiro Método
@@ -83,8 +83,8 @@ Os resultados indicam que este método é ainda mais eficiente do que o segundo 
 
 ```python
 result = db.execute(query).cursor
-    col_names = [desc[0] for desc in result.description]
-    return cursor_to_dict(col_names, result)
+col_names = [desc[0] for desc in result.description]
+return cursor_to_dict(col_names, result)
 ```
 
 ## Quarto Método
@@ -101,10 +101,10 @@ Os resultados indicam que este método é um pouco menos eficiente do que o terc
 
 ```python
 with database.engine.connect() as db:
-        result = db.execute(query).cursor
-        col_names = [desc[0] for desc in result.description]
-        resultado = cursor_to_dict(col_names, result)
-    return resultado
+    result = db.execute(query).cursor
+    col_names = [desc[0] for desc in result.description]
+    resultado = cursor_to_dict(col_names, result)
+return resultado
 ```
 
 ## Conclusão
