@@ -1,0 +1,222 @@
+---
+   author: 'PH Raulino'
+   date: '2026-09-15'
+   title: 'n8n + WhatsApp: lab automation without reinventing orchestration'
+   description: 'How to build a WhatsApp bot in the homelab with n8n, Docker/Traefik, and a minimal inbound → branch → reply flow — plus Evolution API vs Cloud API trade-offs, guardrails, and when not to use n8n.'
+---
+
+## Why n8n in the lab (and not yet another FastAPI orchestration service)
+
+In a homelab, the temptation for anyone coming from full-stack (Python/FastAPI + frontend) is obvious: spin up a service, model states, queues, retries, and webhooks by hand. It works. It also burns time you could spend on data, observability, or the next Ollama experiment.
+
+n8n covers the boring orchestration middle — triggers, branches, retries, credentials, execution history — with a visual editor DX and JSON export. For a WhatsApp bot in the lab, that means: less glue code and more time iterating on behavior.
+
+What n8n does **not** replace: domain logic, API contracts, serious persistence, and architecture decisions. It orchestrates. You still decide what is worth orchestrating.
+
+In this post, the scope is personal and lab-only: Docker (with a natural path to K8s), Traefik at the edge, Postgres when you need state, Grafana on the radar, and WhatsApp as a channel. No critical corporate production, gray-area scraping, or real phone numbers.
+
+## High-level architecture
+
+Simple mental model:
+
+```text
+WhatsApp (user)
+    → channel (Evolution API self-hosted  |  Meta WhatsApp Cloud API)
+    → HTTP webhook
+    → n8n (workflow)
+    → branch / transform / HTTP Request (optional → FastAPI)
+    → reply on the channel
+```
+
+Two channel paths, with real trade-offs:
+
+| Approach | Pros | Cons |
+|---|---|---|
+| **Evolution API** (self-hosted, common in BR labs) | Full control, sits behind Traefik, fits the Docker/K8s stack, no Meta onboarding dependency for experiments | You operate the instance, session/QR, updates, and project stability; TOS/WhatsApp risk if misconfigured |
+| **WhatsApp Cloud API** (Meta) | Official API, clear docs, stable webhooks, better policy alignment | App Review, WABA, test/production numbers, templates for outbound in some scenarios, less “plug and play” in the lab |
+
+There is no single “correct” vendor. In the lab, Evolution (or an equivalent self-hosted adapter) usually wins on experiment speed. Cloud API wins when you want to validate the official path early. The rest of this post treats the channel as a **webhook source + reply sink** — the n8n workflow barely changes.
+
+Typical pieces on the same cluster/homelab:
+
+- **Traefik**: TLS, routing `n8n.lab.example`, `wa-gateway.lab.example`
+- **n8n**: workflows + credentials via env
+- **Postgres**: n8n backend (and, if you want, conversation logs)
+- **Optional**: FastAPI for logic you prefer to version in code; Ollama later for LLM replies; Grafana for metrics/alerts; Hermes/Jellyfin etc. coexisting on the same Traefik without mixing responsibilities
+
+## Docker + Traefik–friendly deploy
+
+**Example** fragment (not a production compose). Idea: services on the same network, Traefik labels, secrets only in env.
+
+```yaml
+# example — docker-compose fragment
+services:
+  n8n:
+    image: n8nio/n8n:latest
+    environment:
+      - N8N_HOST=n8n.lab.example
+      - N8N_PROTOCOL=https
+      - WEBHOOK_URL=https://n8n.lab.example/
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_DATABASE=n8n
+      - DB_POSTGRESDB_USER=n8n
+      - DB_POSTGRESDB_PASSWORD=${N8N_DB_PASSWORD}
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.n8n.rule=Host(`n8n.lab.example`)
+      - traefik.http.routers.n8n.entrypoints=websecure
+      - traefik.http.routers.n8n.tls=true
+    networks: [lab]
+
+  # wa-gateway: Evolution API or another adapter — same label pattern
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: n8n
+      POSTGRES_USER: n8n
+      POSTGRES_PASSWORD: ${N8N_DB_PASSWORD}
+    volumes: [n8n_pg:/var/lib/postgresql/data]
+    networks: [lab]
+
+networks:
+  lab:
+volumes:
+  n8n_pg:
+```
+
+DX notes that save pain:
+
+- Set `WEBHOOK_URL` to the public host (Traefik). An internal webhook `http://n8n:5678` breaks when the channel needs to reach n8n from outside.
+- Split networks: the WhatsApp gateway and n8n talk to each other; the rest of the lab (Jellyfin, etc.) does not need to see the bot’s credentials.
+- On K8s, the same design becomes Deployment + IngressRoute/Ingress; the value is in the HTTP contract, not the orchestrator.
+- Backup: n8n’s Postgres volume + workflow exports (JSON). A workflow without backup is a disposable script with a nice UI.
+
+**Example** env (fictional values):
+
+```bash
+# example — .env (never committed)
+N8N_DB_PASSWORD=change-me
+WA_GATEWAY_API_KEY=lab-key-example
+N8N_WEBHOOK_HMAC_SECRET=hmac-lab-example
+FASTAPI_CALLBACK_URL=http://fastapi:8000/hooks/wa
+```
+
+## Minimal flow: inbound → branch → reply
+
+Goal: a message arrives, you classify it, reply — and, if it makes sense, forward an event to your own FastAPI.
+
+### 1. Inbound webhook
+
+In n8n: a **Webhook** node (POST), path like `/wa/inbound`, immediate `200` response so the gateway does not retry for no reason.
+
+**Example** payload (generic shape; normalize for Evolution or Cloud API):
+
+```json
+{
+  "event": "message.upsert",
+  "from": "5511999990000",
+  "text": "status",
+  "messageId": "ABC123",
+  "timestamp": "2026-09-15T01:00:00Z"
+}
+```
+
+Tip: the first node after Webhook is usually a **Set/Code** that normalizes `from`, `text`, `messageId` — so the rest of the flow does not couple to the channel vendor.
+
+### 2. Branch by intent
+
+An **IF** / **Switch** node on normalized `text` (lower/trim):
+
+- `status` → reply with lab health (or HTTP GET to FastAPI `/health`)
+- `help` → short menu
+- default → “didn’t get that; send help”
+
+For data peers: treat this as cheap routing. When the tree grows, extract rules into a service or a model (Ollama) — don’t jam improvised NLP into 15 IFs on the canvas.
+
+### 3. Reply
+
+HTTP Request to the gateway’s send endpoint (Evolution: something like `POST /message/sendText/...`; Cloud API: Graph API). Auth via an n8n credential (Header Auth / Bearer) pointing at env — never hardcode in the node.
+
+### 4. Optional: webhook to FastAPI
+
+When the logic stops being “lab if/else” and becomes domain (queries, jobs, side effects), n8n becomes the edge:
+
+```text
+n8n → HTTP POST → FastAPI (/hooks/wa)
+                 → validates HMAC
+                 → processes
+                 → 202 + job_id (or short synchronous reply)
+```
+
+**Example** contract sketch in FastAPI:
+
+```python
+# example — minimal callback
+from fastapi import FastAPI, Header, HTTPException
+from pydantic import BaseModel
+import hmac, hashlib, os
+
+app = FastAPI()
+SECRET = os.environ["N8N_WEBHOOK_HMAC_SECRET"].encode()
+
+class WaEvent(BaseModel):
+    from_msisdn: str
+    text: str
+    message_id: str
+
+@app.post("/hooks/wa")
+async def wa_hook(
+    body: WaEvent,
+    x_signature: str = Header(default=""),
+):
+    digest = hmac.new(SECRET, body.model_dump_json().encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(digest, x_signature):
+        raise HTTPException(status_code=401, detail="invalid signature")
+    # enqueue / process...
+    return {"ok": True}
+```
+
+Healthy pattern: n8n handles channel + light routing; FastAPI handles rules you want to pytest and version in Git.
+
+## Guardrails (the lab has rules too)
+
+- **Consent**: the bot only talks to numbers you authorized (allowlist in the workflow or gateway). Homelab is not an excuse for spam.
+- **Rate limit**: limit per `from` (e.g. N messages/minute). Protects you from loops and from abuse if the webhook leaks.
+- **Idempotency**: use `messageId` so you do not reply twice to the same event (Set + Postgres or static data with TTL — simple in the lab).
+- **Secrets**: API keys, Meta tokens, Postgres passwords only in env / orchestrator secrets. n8n credentials point at variables; versioned workflows without secrets.
+- **No gray area**: do not automate scraping third-party conversations, contact harvesting, or bypassing WhatsApp policies. If the use case requires the official Cloud API, use Cloud API.
+- **Attack surface**: authenticated webhook (HMAC or a rotatable token in the URL), Traefik without exposing raw ports, and ideally an IP allowlist if the gateway is the only caller.
+- **Data**: minimize what you persist. Transcripts in the lab Postgres are useful until they leak in an unencrypted backup.
+
+## When **not** to use n8n
+
+- The workflow is just “receive JSON and call a function”: a FastAPI endpoint + worker solves it with fewer moving parts.
+- You need hard latency, high throughput, or fine-grained backpressure control — visual orchestrators get in the way.
+- Business logic *is* the product: a workflow UI hides complexity that should live in reviewable code.
+- Compliance/audit needs trails that lab n8n does not deliver out of the box (then the design changes in purpose, not just tooling).
+- The whole team hates canvases and prefers Git-first: you can export JSON, but that is not the primary DX.
+
+n8n shines at integration and experimentation. If the flow stabilizes and becomes core, consider extracting it.
+
+## Quick trade-offs (so we don’t romanticize)
+
+- **Delivery speed** in the lab: high with n8n.
+- **Native observability**: n8n executions and logs help; business metrics still want Grafana/Prometheus in the environment.
+- **Channel vendor lock-in**: normalize the payload early; swapping Evolution ↔ Cloud API should not rewrite FastAPI.
+- **Cognitive cost**: canvas scales poorly without convention (folders, naming, sub-workflows). Treat workflows as code: review, versioning, staging environment.
+
+## Next steps (series hook)
+
+With the skeleton up, the natural path in the same lab:
+
+1. **Observability** — webhook metrics, reply error rate, p95 latency; Grafana dashboards and alerts when the channel drops.
+2. **AI replies with Ollama** — HTTP/LangChain-like node in n8n (or FastAPI in the middle) for contextual replies, with an allowlist guardrail and a hard timeout.
+3. **Conversation state** — Postgres for short sessions; avoid an infinite IF tree on the canvas.
+4. **Hermes / other lab services** — only enter the flow if there is clear value; a WhatsApp bot does not need to know about the media server.
+
+If this setup works as a base for you, the next post closes the loop: bot metrics in Grafana and an Ollama-assisted reply without turning n8n into a prompt monolith.
+
+---
+
+*Examples in this post are fictional and aimed at homelab use. Adjust contracts to the current docs for your gateway (Evolution API, Cloud API, or other) and to WhatsApp’s policies.*
